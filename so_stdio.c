@@ -9,6 +9,8 @@
 #include "so_stdio.h"
 
 #define BUFFSIZE 4096
+#define READ 0
+#define WRITE 1
 
 struct _so_file {
 
@@ -22,8 +24,10 @@ struct _so_file {
 
 	int error;
 	int eofPos;
+	int feof;
 
 	int bytesRead;
+	int lastOp;
 
 };
 
@@ -71,6 +75,9 @@ SO_FILE *so_fopen(const char *pathname, const char *mode){
 	myFile->writePos = 0;
 	myFile->writeLen = 0;
 	myFile->bytesRead = 0;
+	myFile->lastOp = -1;
+
+	myFile->feof = -3;
 	
 
 	return myFile;
@@ -97,6 +104,25 @@ int xwrite(int fd, const void *buf, size_t count)
     return bytes_written;
 }
 
+ssize_t xread(int fd, void *buf, size_t count)
+{
+    size_t bytes_read = 0;
+
+    while (bytes_read < count) {
+        ssize_t bytes_read_now = read(fd, buf + bytes_read,
+                                      count - bytes_read);
+
+        if (bytes_read_now == 0) /* EOF */
+            return bytes_read;
+
+        if (bytes_read_now < 0) /* I/O error */
+            return -1;
+
+        bytes_read += bytes_read_now;
+    }
+
+    return bytes_read;
+}
 
 int so_fclose(SO_FILE *stream){
 
@@ -137,11 +163,14 @@ int so_fflush(SO_FILE *stream) {
 	if (stream == NULL)
 		return SO_EOF;
 
-	int rc = xwrite(stream->fd, stream->buffer, stream->writeLen);
-	printf("flush here \n");
-	if (rc < 0) {
-		stream->error = 1;
-		return SO_EOF;
+	if (stream->lastOp == WRITE) {
+		int rc = xwrite(stream->fd, stream->buffer, stream->writeLen);
+		//printf("flush here \n");
+		if (rc < 0) {
+			stream->error = 1;
+			free(stream);
+			return SO_EOF;
+		}
 	}
 
 	return 0;
@@ -157,6 +186,14 @@ int so_fseek(SO_FILE *stream, long offset, int whence){
 		stream->error = 1;
 		return SO_EOF;
 	}
+
+	if (stream->lastOp == WRITE)
+		so_fflush(stream);
+
+	if (stream->lastOp == READ) {
+		stream->bufferPos = 0;
+	}
+
 
 	if ((whence == SEEK_CUR) || (whence == SEEK_SET) || (whence == SEEK_END)) {
 		int ls = lseek(stream->fd, offset, whence);
@@ -181,12 +218,16 @@ long so_ftell(SO_FILE *stream) {
 }
 
 size_t so_fread(void *ptr, size_t size, size_t nmemb, SO_FILE *stream) {
-	//int bytesWritten = 0;
 
 	if (stream == NULL) {
 		stream->error = 1;
 		return SO_EOF;
 	}
+
+	if(stream->lastOp == WRITE){
+		so_fflush(stream);
+	}
+	stream->lastOp = READ;
 
 	int bytesToBeRead = nmemb * size;
 
@@ -195,10 +236,13 @@ size_t so_fread(void *ptr, size_t size, size_t nmemb, SO_FILE *stream) {
 		//bytesWritten += rc;
 		//printf("- %d: %c\n", i, rc);
 		// either error or EOF from fgetc
-		if (rc == SO_EOF){
-			//printf("here %d\n", i);
+		if (rc == SO_EOF){			
 			stream->error = 1;
 			return 0;
+		}
+		if (rc == -2){			
+			stream->feof = 0;
+			return nmemb / size;
 		}
 		*((char *)ptr + i) = rc;
 		//memcpy(ptr + i, stream->buffer + stream->bufferPos, 1);
@@ -214,6 +258,12 @@ size_t so_fwrite(const void *ptr, size_t size, size_t nmemb, SO_FILE *stream) {
 		stream->error = 1;
 		return SO_EOF;
 	}
+
+	if(stream->lastOp == READ){
+		stream->bufferPos = 0;
+		so_fflush(stream);
+	}
+	stream->lastOp = WRITE;
 
 	int bytesToBeWritten = size * nmemb;
 	//printf("1\n");
@@ -247,6 +297,12 @@ int so_fgetc(SO_FILE *stream){
 		return SO_EOF;
 	}
 
+	if(stream->lastOp == WRITE){
+		so_fflush(stream);
+	}
+
+	stream->lastOp = READ;
+
 	if (stream->bufferPos == 0) {
 	 	stream->bytesRead = read(stream->fd, stream->buffer, BUFFSIZE);
 	 	//printf("rc = %d\n", stream->bytesRead);
@@ -258,7 +314,7 @@ int so_fgetc(SO_FILE *stream){
 			if (stream->bytesRead == 0) {
 				//stream->eofPos = 
 				printf("end of file\n");
-				return SO_EOF;
+				return -2;
 			}
 	
 	}
@@ -286,6 +342,11 @@ int so_fputc(int c, SO_FILE *stream) {
 		return SO_EOF;
 	}
 
+	if (stream->lastOp == READ)
+		stream->writePos = 0;
+
+	stream->lastOp = WRITE;
+
 
 	if (stream->writePos == BUFFSIZE) {
 		int rc = xwrite(stream->fd, stream->buffer, stream->writeLen);
@@ -312,12 +373,19 @@ int so_feof(SO_FILE *stream) {
 	if (stream == NULL)
 		return SO_EOF;
 
-	if (stream->fd == NULL)
+	if (stream->fd == -1) {
+		printf("here1\n");
+		//free(stream);
 		return SO_EOF;
-	
-	int posOfFilePointer = ftell(stream);
+	}
+	long posOfFilePointer = so_ftell(stream);
+	if (stream->feof == 0) {
+		return 1;
+	}
 
 	if (stream->eofPos  == posOfFilePointer) {
+		printf("%d\n", stream->eofPos);
+		printf("here4\n");
 		return 1;
 	}
 
@@ -326,7 +394,7 @@ int so_feof(SO_FILE *stream) {
 
 int so_ferror(SO_FILE *stream){
 
-	if(stream == NULL)
+	if (stream == NULL)
 		return SO_EOF;
 	
 
