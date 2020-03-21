@@ -137,8 +137,8 @@ int so_fclose(SO_FILE *stream){
 	int rc = so_fflush(stream);
 
 	if (stream->writePos > 0 && rc < 0) {
-		free(stream);
 		stream->error = 1;
+		free(stream);
 		return SO_EOF;
 	}
 
@@ -168,7 +168,7 @@ int so_fflush(SO_FILE *stream) {
 		//printf("flush here \n");
 		if (rc < 0) {
 			stream->error = 1;
-			free(stream);
+			//free(stream);
 			return SO_EOF;
 		}
 	}
